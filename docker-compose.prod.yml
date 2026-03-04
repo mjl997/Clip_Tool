@@ -1,0 +1,305 @@
+version: '3.8'
+
+services:
+  # API Gateway
+  gateway:
+    image: traefik:v3.0
+    privileged: true
+    command:
+      - "--api.insecure=false"
+      - "--providers.docker=true"
+      - "--providers.docker.exposedbydefault=false"
+      - "--entrypoints.web.address=:80"
+      - "--entrypoints.websecure.address=:443"
+      # Let's Encrypt
+      - "--certificatesresolvers.myresolver.acme.tlschallenge=true"
+      # - "--certificatesresolvers.myresolver.acme.email=your-email@example.com"
+      - "--certificatesresolvers.myresolver.acme.storage=/letsencrypt/acme.json"
+      # Metrics
+      - "--metrics.prometheus=true"
+      - "--metrics.prometheus.buckets=0.1,0.3,1.2,5.0"
+    ports:
+      - "80:80"
+      - "443:443"
+      - "8080:8080"
+    volumes:
+      - //var/run/docker.sock:/var/run/docker.sock:ro
+      - ./letsencrypt:/letsencrypt
+    networks:
+      - clip-tool-net
+    healthcheck:
+      test: ["CMD", "traefik", "healthcheck", "--ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Database
+  db:
+    image: postgres:15-alpine
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-password}
+      POSTGRES_DB: clip_tool_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - clip-tool-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-user} -d clip_tool_db"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Message Broker
+  broker:
+    image: redis:7-alpine
+    networks:
+      - clip-tool-net
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # Core Service
+  core-service:
+    build:
+      context: ./apps/core-service
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/clip_tool_db
+      - REDIS_URL=redis://broker:6379/0
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.core.rule=PathPrefix(`/api/core`)"
+      - "traefik.http.services.core.loadbalancer.server.port=8000"
+      - "traefik.http.routers.core.entrypoints=web"
+      # - "traefik.http.routers.core.tls.certresolver=myresolver"
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+
+  # Object Storage
+  minio:
+    image: minio/minio
+    command: server /data --console-address ":9001"
+    environment:
+      MINIO_ROOT_USER: ${MINIO_ROOT_USER:-user}
+      MINIO_ROOT_PASSWORD: ${MINIO_ROOT_PASSWORD:-password}
+    ports:
+      - "9000:9000"
+      - "9001:9001"
+    volumes:
+      - minio_data:/data
+    networks:
+      - clip-tool-net
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/minio/health/live"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  # Ingest Service
+  ingest-service:
+    build:
+      context: ./apps/ingest-service
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://broker:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_SECURE=false
+      - MINIO_BUCKET_NAME=videos
+    ports:
+      - "8001:8000"
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.ingest.rule=PathPrefix(`/api/v1/ingest`)"
+      - "traefik.http.services.ingest.loadbalancer.server.port=8000"
+      - "traefik.http.routers.ingest.entrypoints=web"
+      # - "traefik.http.routers.ingest.tls.certresolver=myresolver"
+    depends_on:
+      broker:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 3
+
+  # Transcription Service
+  transcription-service:
+    build:
+      context: ./apps/transcription-service
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://broker:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_SECURE=false
+      - MINIO_BUCKET_NAME=videos
+      - WHISPER_MODEL_SIZE=${WHISPER_MODEL_SIZE:-tiny}
+      - WHISPER_DEVICE=${WHISPER_DEVICE:-cpu}
+      - WHISPER_COMPUTE_TYPE=int8
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.transcription.rule=PathPrefix(`/api/v1/transcription`)"
+      - "traefik.http.services.transcription.loadbalancer.server.port=8000"
+      - "traefik.http.routers.transcription.entrypoints=web"
+      # - "traefik.http.routers.transcription.tls.certresolver=myresolver"
+    depends_on:
+      broker:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Analysis Service
+  analysis-service:
+    build:
+      context: ./apps/analysis-service
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://broker:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_SECURE=false
+      - MINIO_BUCKET_NAME=videos
+      - OPENAI_API_KEY=${OPENAI_API_KEY}
+      - ANTHROPIC_API_KEY=${ANTHROPIC_API_KEY}
+      - DEFAULT_LLM_PROVIDER=openai
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.analysis.rule=PathPrefix(`/api/v1/analysis`)"
+      - "traefik.http.services.analysis.loadbalancer.server.port=8000"
+      - "traefik.http.routers.analysis.entrypoints=web"
+      # - "traefik.http.routers.analysis.tls.certresolver=myresolver"
+    depends_on:
+      broker:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Clip Generation Service
+  clipgen-service:
+    build:
+      context: ./apps/clipgen-service
+      dockerfile: Dockerfile
+    environment:
+      - REDIS_URL=redis://broker:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_SECURE=false
+      - MINIO_BUCKET_NAME=videos
+      - DEFAULT_RATIO=9:16
+    ports:
+      - "8003:8000"
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.clipgen.rule=PathPrefix(`/api/v1/clips`)"
+      - "traefik.http.services.clipgen.loadbalancer.server.port=8000"
+      - "traefik.http.routers.clipgen.entrypoints=web"
+      # - "traefik.http.routers.clipgen.tls.certresolver=myresolver"
+    depends_on:
+      broker:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Export Service
+  export-service:
+    build:
+      context: ./apps/export-service
+      dockerfile: Dockerfile
+    environment:
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-user}:${POSTGRES_PASSWORD:-password}@db:5432/clip_tool_db
+      - REDIS_URL=redis://broker:6379/0
+      - MINIO_ENDPOINT=minio:9000
+      - MINIO_ACCESS_KEY=${MINIO_ROOT_USER:-user}
+      - MINIO_SECRET_KEY=${MINIO_ROOT_PASSWORD:-password}
+      - MINIO_SECURE=false
+      - MINIO_BUCKET_NAME=videos
+    ports:
+      - "8002:8000"
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.export.rule=PathPrefix(`/api/v1/export`) || PathPrefix(`/api/v1/jobs`)"
+      - "traefik.http.services.export.loadbalancer.server.port=8000"
+      - "traefik.http.routers.export.entrypoints=web"
+      # - "traefik.http.routers.export.tls.certresolver=myresolver"
+    depends_on:
+      db:
+        condition: service_healthy
+      broker:
+        condition: service_healthy
+      minio:
+        condition: service_healthy
+
+  # Frontend
+  web:
+    build:
+      context: ./apps/web
+      dockerfile: Dockerfile
+    environment:
+      - NEXT_PUBLIC_API_URL=/api/v1
+    networks:
+      - clip-tool-net
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.web.rule=PathPrefix(`/`)"
+      - "traefik.http.services.web.loadbalancer.server.port=3000"
+      - "traefik.http.routers.web.entrypoints=web"
+      # - "traefik.http.routers.web.tls.certresolver=myresolver"
+    ports:
+      - "3005:3000"
+    depends_on:
+      ingest-service:
+        condition: service_healthy
+
+  # Monitoring Stack
+  prometheus:
+    image: prom/prometheus:latest
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml
+    networks:
+      - clip-tool-net
+    ports:
+      - "9090:9090"
+
+  grafana:
+    image: grafana/grafana:latest
+    environment:
+      - GF_SECURITY_ADMIN_PASSWORD=${GRAFANA_PASSWORD:-password}
+    networks:
+      - clip-tool-net
+    ports:
+      - "3001:3000"
+    depends_on:
+      - prometheus
+
+volumes:
+  postgres_data:
+  minio_data:
+
+networks:
+  clip-tool-net:
+    driver: bridge

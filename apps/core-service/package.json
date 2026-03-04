@@ -1,0 +1,12 @@
+{
+  "name": "core-service",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "build": "docker build -t core-service .",
+    "dev": "uvicorn src.main:app --reload",
+    "lint": "flake8 src",
+    "test": "pytest",
+    "format": "black src"
+  }
+}
