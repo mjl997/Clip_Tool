@@ -21,7 +21,7 @@
     - **Analysis Service**: [http://localhost/api/v1/analysis/health](http://localhost/api/v1/analysis/health)
     - **ClipGen Service**: [http://localhost/api/v1/clips/health](http://localhost/api/v1/clips/health)
     - **Export Service**: [http://localhost/api/v1/export/health](http://localhost/api/v1/export/health)
-    - **Frontend**: [http://localhost:3000](http://localhost:3000)
+    - **Frontend**: [http://localhost:8000](http://localhost:8000)
     - **MinIO Console**: [http://localhost:9001](http://localhost:9001) (user/password)
 
 3.  **Database Migrations**:
@@ -36,7 +36,7 @@
 
 ## Usage (Web UI)
 
-1.  Open [http://localhost:3000](http://localhost:3000) in your browser.
+1.  Open [http://localhost:8000](http://localhost:8000) in your browser.
 2.  Paste a YouTube URL and click **Process**.
 3.  Watch the progress bar as the system ingests, transcribes, analyzes, and generates clips.
 4.  Once complete, browse the viral clips grid.
