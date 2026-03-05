@@ -136,6 +136,11 @@ class LLMService:
                     
         except Exception as e:
             logger.error(f"LLM analysis failed with {provider}: {e}")
+            
+            # Check for 503, 429, or capacity/limit errors
+            error_str = str(e).lower()
+            is_overload = "503" in error_str or "capacity" in error_str or "429" in error_str or "rate limit" in error_str
+            
             # Try fallback explicitly if first attempt failed
             if provider == "openai" and self.anthropic_client:
                 logger.info("Falling back to Anthropic")
@@ -143,11 +148,27 @@ class LLMService:
             elif provider == "anthropic" and self.openai_client:
                 logger.info("Falling back to OpenAI")
                 return await self._call_openai(formatted_prompt)
+            
+            # If no fallback available and it's an overload/rate limit error, wait and retry once
+            if is_overload:
+                wait_time = 20 # Wait longer for rate limits (16.5s in error message)
+                logger.info(f"Service overloaded/rate limited. Retrying in {wait_time} seconds...")
+                await asyncio.sleep(wait_time)
+                
+                # Try with a cheaper/faster model for retry if possible
+                if provider == "openai":
+                    # Fallback to gpt-3.5-turbo if gpt-4 is limited? 
+                    # Or just retry same model. Let's try same model for now but maybe we should use gpt-3.5-turbo-0125
+                    return await self._call_openai(formatted_prompt, model="gpt-3.5-turbo-0125")
+                elif provider == "anthropic":
+                    return await self._call_anthropic(formatted_prompt, model="claude-3-haiku-20240307")
+                    
             raise e
 
-    async def _call_openai(self, prompt: str):
+    async def _call_openai(self, prompt: str, model: str = "gpt-4-turbo-preview"):
+        logger.info(f"Calling OpenAI with model: {model}")
         response = await self.openai_client.chat.completions.create(
-            model="gpt-4-turbo-preview",
+            model=model,
             messages=[
                 {"role": "system", "content": "You are a JSON-only API. Return valid JSON."},
                 {"role": "user", "content": prompt}
@@ -164,9 +185,10 @@ class LLMService:
             logger.error(f"Failed to parse OpenAI JSON: {e}")
             return []
 
-    async def _call_anthropic(self, prompt: str):
+    async def _call_anthropic(self, prompt: str, model: str = "claude-3-opus-20240229"):
+        logger.info(f"Calling Anthropic with model: {model}")
         response = await self.anthropic_client.messages.create(
-            model="claude-3-opus-20240229",
+            model=model,
             max_tokens=4096,
             messages=[{"role": "user", "content": prompt}]
         )
