@@ -12,54 +12,88 @@ class AnalyzerService:
         # 2. LLM Analysis
         # We pass the full text from transcript_data
         transcript_text = transcript_data.get("text", "")
-        # Or reconstruct from words if needed
-        
-        llm_segments = await llm_service.analyze_transcript(transcript_text)
+        # Construct transcript with timestamps for better LLM context
+        # Format: [00:00.000 -> 00:05.000] Text segment
+        formatted_transcript = ""
+        if "segments" in transcript_data:
+            for s in transcript_data["segments"]:
+                start = s.get("start", 0)
+                end = s.get("end", 0)
+                text = s.get("text", "").strip()
+                formatted_transcript += f"[{self._format_time(start)} -> {self._format_time(end)}] {text}\n"
+        else:
+            formatted_transcript = transcript_text
+
+        # Pass audio context if available
+        audio_context = ""
+        if "high_energy_events" in audio_stats:
+            audio_context = "SEÑALES DE AUDIO DETECTADAS:\n"
+            for event in audio_stats["high_energy_events"]:
+                audio_context += f"- [{self._format_time(event['start'])} -> {self._format_time(event['end'])}] Pico de energía alta\n"
+
+        llm_segments = await llm_service.analyze_transcript(formatted_transcript, audio_context=audio_context)
         
         # 3. Merge & Refine
         final_segments = []
         for seg in llm_segments:
-            # Map LLM approximate timestamps to actual word timestamps
-            # This logic needs to be robust. 
-            # Ideally LLM returns text snippets, and we match them to 'words' in transcript_data
-            
-            # For this MVP, we assume LLM returns reasonable timestamps or we trust them.
-            # But "Merge scores: LLM (70%) + Audio (30%)"
-            
-            llm_score = seg.get("score", 0)
-            
-            # Calculate audio score for this segment
+            # Validation logic
             start = seg.get("start", 0)
             end = seg.get("end", 0)
             
-            # Check energy in this interval
-            # audio_stats has 'rms_curve' (downsampled) or we can't easily map back without raw data
-            # Let's use simple logic: if peak inside, boost score
-            
-            audio_boost = 0
-            if "peaks" in audio_stats:
-                peaks = [p for p in audio_stats["peaks"] if start <= p <= end]
-                if peaks:
-                    audio_boost = 20 # Arbitrary boost for high energy
-            
-            # Weighted merge
-            # If LLM score is 0-100
-            # Audio score could be normalized 0-100 based on energy relative to avg
-            
-            audio_score = min(100, (audio_stats.get("avg_energy", 0) * 1000)) # very rough
-            if audio_boost:
-                audio_score = 100
+            # Validate duration (15s - 60s)
+            duration = end - start
+            if duration < 15 or duration > 60:
+                logger.warning(f"Discarding segment {start}-{end}: Invalid duration {duration}s")
+                continue
                 
-            final_score = (llm_score * 0.7) + (audio_score * 0.3)
+            # Validate boundaries against video duration
+            if end > audio_stats.get("duration", end + 1):
+                 logger.warning(f"Discarding segment {start}-{end}: Ends after video duration")
+                 continue
+
+            llm_score = seg.get("score", 0)
+            
+            # Calculate audio score for this segment
+            audio_score = 0
+            if "high_energy_events" in audio_stats:
+                # Check overlap with energy events
+                for event in audio_stats["high_energy_events"]:
+                    # Simple overlap check
+                    if max(start, event["start"]) < min(end, event["end"]):
+                        audio_score = 20 # Boost for energy overlap
+                        break
+            
+            # Weighted merge (LLM dominates, Audio boosts)
+            # LLM score is already 0-100 based on virality criteria
+            # We add a small boost for audio energy confirmation, capped at 100
+            final_score = min(100, llm_score + audio_score)
             
             seg["score"] = round(final_score, 1)
-            seg["audio_score"] = round(audio_score, 1)
+            seg["audio_boost"] = audio_score
             
             final_segments.append(seg)
             
-        # Sort by score
+        # Check overlaps and keep highest score
+        # Sort by score descending
         final_segments.sort(key=lambda x: x["score"], reverse=True)
         
-        return final_segments[:10] # Top 10
+        non_overlapping = []
+        for seg in final_segments:
+            overlap = False
+            for kept in non_overlapping:
+                # Check overlap
+                if max(seg["start"], kept["start"]) < min(seg["end"], kept["end"]):
+                    overlap = True
+                    break
+            if not overlap:
+                non_overlapping.append(seg)
+        
+        return non_overlapping[:8] # Top 8 as requested
+
+    def _format_time(self, seconds):
+        mins = int(seconds // 60)
+        secs = int(seconds % 60)
+        ms = int((seconds % 1) * 1000)
+        return f"{mins:02d}:{secs:02d}.{ms:03d}"
 
 analyzer = AnalyzerService()

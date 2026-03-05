@@ -98,6 +98,10 @@ async def ingest_video(request: IngestRequest, background_tasks: BackgroundTasks
         logger.error(f"Ingest error: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
 
+@app.get("/api/v1/ingest/health")
+def api_health_check():
+    return {"status": "ok"}
+
 @app.get("/api/v1/ingest/{job_id}", response_model=JobStatus)
 async def get_job_status(job_id: str):
     job = job_store.get_job(job_id)

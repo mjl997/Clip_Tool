@@ -36,14 +36,26 @@ class AudioService:
             avg_energy = np.mean(rms)
             max_energy = np.max(rms)
             
-            logger.info(f"Audio analysis complete. Duration: {duration}s")
+            # Group peaks into events (if peaks are close, merge them)
+            # Simple clustering: if peaks are within 2 seconds, keep start of first and end of last
+            events = []
+            if len(peak_times) > 0:
+                current_event = {"start": peak_times[0], "end": peak_times[0]}
+                for t in peak_times[1:]:
+                    if t - current_event["end"] < 2.0:
+                        current_event["end"] = t
+                    else:
+                        events.append(current_event)
+                        current_event = {"start": t, "end": t}
+                events.append(current_event)
+
+            logger.info(f"Audio analysis complete. Duration: {duration}s. Found {len(events)} energy events.")
             
             return {
                 "duration": duration,
-                "peaks": peak_times.tolist(),
+                "high_energy_events": events,
                 "avg_energy": float(avg_energy),
-                "max_energy": float(max_energy),
-                "rms_curve": rms_norm.tolist()[::100] # Downsample for storage if needed
+                "max_energy": float(max_energy)
             }
             
         except Exception as e:

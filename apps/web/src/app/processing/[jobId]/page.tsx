@@ -51,7 +51,7 @@ export default function ProcessingPage({ params }: { params: { jobId: string } }
         const clipsRes = await fetch(`/api/v1/clips/${jobId}`);
         const clipsData = await clipsRes.json();
         
-        if (clipsData.status === "completed") {
+        if (clipsData.status === "completed" || clipsData.status === "clips_ready") {
           setStatus("Completed!");
           setProgress(100);
           router.push(`/results/${jobId}`);
